@@ -967,8 +967,9 @@ namespace gloss::overlay
             const bool valid = gameplay::ValidateParameters(feature, values, error);
             if (valid) hotkeys::GetRegistry().SetParameters(ActionHotkeyId(feature.id), values);
             ImGui::BeginDisabled(!ready || !valid || active);
-            const bool flightStep = feature.id == "flight_up" || feature.id == "flight_down";
-            if (ImGui::Button(WidgetLabel(feature.params.empty() || flightStep ? "执行" : "应用", "submit"), ImVec2((feature.params.empty() ? 84 : 64) * scale, 0)))
+            const bool runLabel = feature.params.empty() || feature.id == "flight_up" || feature.id == "flight_down" ||
+                feature.id == "add_dust" || feature.id == "add_upgrade_materials";
+            if (ImGui::Button(WidgetLabel(runLabel ? "执行" : "应用", "submit"), ImVec2((feature.params.empty() ? 84 : 64) * scale, 0)))
             {
                 const auto result = gameplay::GetBackend().Submit(feature.id, std::move(values));
                 submissionNotice = {true, result.accepted, result.requestId, feature.id, result.message};
@@ -1615,8 +1616,9 @@ namespace gloss::overlay
                 for (const auto &item : derivedItems)
                     if (browsable(item) && (category.empty() || item.category == category) &&
                         (SearchText(item.name).find(query) != std::string::npos ||
-                            (item.key == "resource:consciousness_dust" && std::string_view("意识粉尘").find(query) != std::string_view::npos) ||
-                            (settings.debug && SearchText(item.key).find(query) != std::string::npos)))
+                            SearchText(item.description).find(query) != std::string::npos ||
+                            SearchText(item.key).find(query) != std::string::npos ||
+                            (item.key == "resource:consciousness_dust" && std::string_view("意识粉尘").find(query) != std::string_view::npos)))
                         filtered.push_back(&item);
                 filteredQuery = query;
                 filteredCategory = category;

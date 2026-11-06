@@ -146,6 +146,45 @@ namespace
         CHECK(travel && !ValidateParameters(*travel, {"0,0,0", "0,0,0", ""}, error));
         CHECK(travel && ValidateParameters(*travel, {"0,0,0", "0,0,0", "MapName"}, error));
 
+        const auto* addDust = FindFeature("add_dust");
+        CHECK(addDust != nullptr);
+        if (addDust) {
+            CHECK(addDust->functionName == "Native_ExtendedAction");
+            CHECK(addDust->page == 1 && addDust->category == 3 && addDust->persistent);
+            CHECK(addDust->fixedArguments == std::vector<std::string>({"add_dust"}));
+            CHECK(addDust->params.size() == 1);
+            if (addDust->params.size() == 1) {
+                CHECK(addDust->params[0].type == ParamType::Int);
+                CHECK(addDust->params[0].defaultValue == "999999");
+                CHECK(addDust->params[0].minimum == 1 && addDust->params[0].maximum == MaxItemQuantity);
+            }
+            CHECK(ValidateParameters(*addDust, {"999999"}, error));
+            CHECK(ValidateParameters(*addDust, {"1"}, error));
+            CHECK(ValidateParameters(*addDust, {std::to_string(MaxItemQuantity)}, error));
+            CHECK(!ValidateParameters(*addDust, {"0"}, error));
+            CHECK(!ValidateParameters(*addDust, {"-1"}, error));
+            CHECK(!ValidateParameters(*addDust, {"2147483648"}, error));
+        }
+
+        const auto* addMaterials = FindFeature("add_upgrade_materials");
+        CHECK(addMaterials != nullptr);
+        if (addMaterials) {
+            CHECK(addMaterials->functionName == "Native_ExtendedAction");
+            CHECK(addMaterials->page == 1 && addMaterials->category == 3 && addMaterials->persistent);
+            CHECK(addMaterials->fixedArguments == std::vector<std::string>({"add_upgrade_materials"}));
+            CHECK(addMaterials->params.size() == 1);
+            if (addMaterials->params.size() == 1) {
+                CHECK(addMaterials->params[0].type == ParamType::Int);
+                CHECK(addMaterials->params[0].defaultValue == "99");
+                CHECK(addMaterials->params[0].minimum == 1 && addMaterials->params[0].maximum == 999);
+            }
+            CHECK(ValidateParameters(*addMaterials, {"99"}, error));
+            CHECK(ValidateParameters(*addMaterials, {"1"}, error));
+            CHECK(ValidateParameters(*addMaterials, {"999"}, error));
+            CHECK(!ValidateParameters(*addMaterials, {"0"}, error));
+            CHECK(!ValidateParameters(*addMaterials, {"1000"}, error));
+        }
+
         const auto* speed = FindFeature("game_speed");
         CHECK(speed && ValidateParameters(*speed, {"0.1"}, error));
         CHECK(speed && ValidateParameters(*speed, {"3"}, error));
@@ -1309,9 +1348,12 @@ namespace
         const auto file = SettingsFile("extended-actions");
         Backend backend;
         CHECK(backend.InitializeSettings(file));
-        Ready(backend, {"remaining_days", "unlock_66_days", "flight_up", "flight_down"});
+        Ready(backend, {"add_dust", "add_upgrade_materials", "remaining_days", "unlock_66_days", "flight_up", "flight_down"});
         CHECK(!backend.Submit("remaining_days", {"67"}).accepted);
-        for (const auto id : {"remaining_days", "unlock_66_days", "flight_up", "flight_down"}) {
+        CHECK(!backend.Submit("add_dust", {"0"}).accepted);
+        CHECK(!backend.Submit("add_upgrade_materials", {"0"}).accepted);
+        CHECK(!backend.Submit("add_upgrade_materials", {"1000"}).accepted);
+        for (const auto id : {"add_dust", "add_upgrade_materials", "remaining_days", "unlock_66_days", "flight_up", "flight_down"}) {
             CHECK(backend.Submit(id).accepted);
             CHECK(backend.Pump([](const Request& request) {
                 CHECK(!request.restoration);

@@ -15,6 +15,8 @@
             0x40,0x53,0x48,0x83,0xec,0x20,0x48,0x8b,0xda,0xe8,0x32,0x3b,0xff,0xff,0x48,0x85,0xc0,0x74,0x22,0x48,0x63,0x53,0x08};
         std::atomic<ScriptVerify> originalScriptVerify{};
         bool scriptVerifyCreated{}, scriptVerifyPatched{}, scriptVerifyPatchCaptured{};
+        bool scriptCallSitePatched{};
+        std::array<unsigned char, 5> scriptSavedCallSite{};
         std::array<unsigned char, 16> scriptVerifyOwnedEntry{};
         Address scriptEnv{}, scriptLoader{}, scriptLogger{};
         Context scriptContext;
@@ -122,13 +124,21 @@
                 return true;
             } __except (ScriptExceptionFilter(GetExceptionInformation(), "module-allocation-copy")) { return false; }
         }
+        bool ScriptPrivateBytesMatch(const ScriptBytes* input) noexcept;
         bool __fastcall HookScriptLoad(Address loader, const StringValue* path, ScriptBytes* out) {
             if (scriptExecuting && !faulted.load() && loader == scriptLoader && LocalGameThread() &&
                 ScriptStringEquals(path, ScriptModuleName, std::size(ScriptModuleName) - 1))
                 {
                     scriptStage = "private-load";
                     const bool loaded = ScriptFillBytes(out, scriptSource.data(), scriptSource.size());
-                    if (loaded) { scriptDataDescriptor = reinterpret_cast<Address>(out); scriptLoadedBytes = *out; }
+                    if (loaded) {
+                        scriptDataDescriptor = reinterpret_cast<Address>(out);
+                        scriptLoadedBytes = *out;
+                        if (scriptCallSitePatched && ScriptPrivateBytesMatch(out)) {
+                            scriptStage = "private-verified";
+                            scriptPrivateVerified = true;
+                        }
+                    }
                     return loaded;
                 }
             return reinterpret_cast<ScriptLoad>(scriptSavedSlots[1].load())(loader, path, out);
@@ -242,6 +252,35 @@
             scriptVerifyPatched = false;
             return true;
         }
+        bool PatchScriptVerifyCallSite() noexcept {
+            if (scriptCallSitePatched) return true;
+            constexpr Address callSiteRva = 0x61ec4ce + 12;
+            if (!ReadBytes(base + callSiteRva, scriptSavedCallSite.data(), scriptSavedCallSite.size()) ||
+                scriptSavedCallSite[0] != 0xe8) return false;
+            DWORD previous{};
+            if (!VirtualProtect(reinterpret_cast<void*>(base + callSiteRva), 5, PAGE_EXECUTE_READWRITE, &previous))
+                return false;
+            constexpr std::array<unsigned char, 5> patch{0xb0, 0x01, 0x0f, 0x1f, 0x00};
+            std::memcpy(reinterpret_cast<void*>(base + callSiteRva), patch.data(), patch.size());
+            FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<const void*>(base + callSiteRva), 5);
+            DWORD ignored{};
+            VirtualProtect(reinterpret_cast<void*>(base + callSiteRva), 5, previous, &ignored);
+            scriptCallSitePatched = true;
+            return true;
+        }
+        bool RestoreScriptVerifyCallSite() noexcept {
+            if (!scriptCallSitePatched) return true;
+            constexpr Address callSiteRva = 0x61ec4ce + 12;
+            DWORD previous{};
+            if (!VirtualProtect(reinterpret_cast<void*>(base + callSiteRva), 5, PAGE_EXECUTE_READWRITE, &previous))
+                return false;
+            std::memcpy(reinterpret_cast<void*>(base + callSiteRva), scriptSavedCallSite.data(), scriptSavedCallSite.size());
+            FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<const void*>(base + callSiteRva), 5);
+            DWORD ignored{};
+            VirtualProtect(reinterpret_cast<void*>(base + callSiteRva), 5, previous, &ignored);
+            scriptCallSitePatched = false;
+            return true;
+        }
         std::array<Address, 6> ScriptHookSlots() {
             return {base + 0xbe93e10, base + 0xbe93e18, base + 0xbe92b48,
                 base + 0xbe92b50, base + 0xbe92b58, base + 0xbe92b60};
@@ -259,8 +298,11 @@
             return false;
         }
         bool RestoreScriptHooks(bool keepVerifier = false) {
+            const bool externalCallSite = scriptCallSitePatched;
+            const bool callSiteRestored = RestoreScriptVerifyCallSite();
             const auto slots = ScriptHookSlots(), hooks = ScriptHookFunctions();
-            bool restored = keepVerifier ? ScriptVerifyOwnership() : RestoreScriptVerifyHook();
+            bool restored = callSiteRestored && (externalCallSite ? true :
+                (keepVerifier ? ScriptVerifyOwnership() : RestoreScriptVerifyHook()));
             for (std::size_t i = scriptPatched.size(); i-- > 0;) {
                 if (!scriptPatched[i]) continue;
                 if (Read<Address>(slots[i]) == scriptSavedSlots[i].load() ||
@@ -321,8 +363,33 @@
             std::array<unsigned char, N> observed{};
             return ReadBytes(base + rva, observed.data(), observed.size()) && observed == expected;
         }
+        bool ScriptVerifierCallSiteValid() {
+            constexpr std::array<unsigned char, 21> verifierDispatch{
+                0x84,0xc0,0x74,0x16,0x48,0x8d,0x55,0x08,0x48,0x8d,0x4d,0xf8,0xe8,0xc1,0xa0,0x10,0x00,0x84,0xc0,0x74,0x05};
+            std::array<unsigned char, 21> observed{};
+            if (!ReadBytes(base + 0x61ec4ce, observed.data(), observed.size())) return false;
+            if (observed == verifierDispatch) return true;
+            if (!std::equal(verifierDispatch.begin(), verifierDispatch.begin() + 13, observed.begin()) ||
+                !std::equal(verifierDispatch.begin() + 17, verifierDispatch.end(), observed.begin() + 17)) return false;
+            std::int32_t rel{};
+            std::memcpy(&rel, observed.data() + 13, sizeof(rel));
+            return Executable(static_cast<Address>(static_cast<std::intptr_t>(base + 0x61ec4ce + 17) + rel));
+        }
+        bool ScriptVerifyExternalHook() {
+            std::array<unsigned char, ScriptVerifyEntry.size()> bytes{};
+            if (!ReadBytes(base + ScriptVerifyRva, bytes.data(), bytes.size())) return false;
+            if (bytes[0] != 0xe9 || !std::equal(bytes.begin() + 5, bytes.end(), ScriptVerifyEntry.begin() + 5)) return false;
+            std::int32_t rel{};
+            std::memcpy(&rel, bytes.data() + 1, sizeof(rel));
+            return Executable(static_cast<Address>(static_cast<std::intptr_t>(base + ScriptVerifyRva + 5) + rel));
+        }
+        bool ScriptExternalBypassActive() {
+            constexpr std::array<unsigned char, 21> verifierDispatch{
+                0x84,0xc0,0x74,0x16,0x48,0x8d,0x55,0x08,0x48,0x8d,0x4d,0xf8,0xe8,0xc1,0xa0,0x10,0x00,0x84,0xc0,0x74,0x05};
+            return (!scriptVerifyPatched && ScriptVerifyExternalHook()) ||
+                (!ScriptBodyMatches(0x61ec4ce, verifierDispatch) && ScriptVerifierCallSiteValid());
+        }
         bool ScriptBodiesValid() {
-            constexpr std::array<unsigned char, 21> verifierDispatch{0x84,0xc0,0x74,0x16,0x48,0x8d,0x55,0x08,0x48,0x8d,0x4d,0xf8,0xe8,0xc1,0xa0,0x10,0x00,0x84,0xc0,0x74,0x05};
             constexpr std::array<unsigned char, 31> executeEntry{0x48,0x89,0x5c,0x24,0x18,0x55,0x56,0x57,0x41,0x54,0x41,0x55,0x41,0x56,0x41,0x57,0x48,0x8d,0xac,0x24,0x00,0xfe,0xff,0xff,0x48,0x81,0xec,0x00,0x03,0x00,0x00};
             constexpr std::array<unsigned char, 57> loaderDispatch{0x48,0x8b,0x8e,0x70,0x01,0x00,0x00,0x48,0x8b,0x01,0x48,0x8d,0x55,0x48,0x48,0x89,0x54,0x24,0x20,0x4c,0x8d,0x4d,0xf8,0x4c,0x8b,0xc7,0x48,0x8d,0x55,0x80,0xff,0x10,0x84,0xc0,0x74,0x6d,0x48,0x8b,0x8e,0x70,0x01,0x00,0x00,0x48,0x8b,0x01,0x4c,0x8d,0x45,0x08,0x48,0x8d,0x55,0xf8,0xff,0x50,0x08};
             constexpr std::array<unsigned char, 62> wideConstructor{0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x6c,0x24,0x10,0x48,0x89,0x74,0x24,0x18,0x57,0x41,0x56,0x41,0x57,0x48,0x83,0xec,0x30,0x33,0xed,0x4c,0x8d,0x79,0x08,0x48,0x89,0x29,0x4c,0x8d,0x71,0x0c,0x41,0x89,0x2f,0x48,0x8b,0xf2,0x41,0x89,0x2e,0x48,0x8b,0xd9,0x48,0x85,0xd2,0x74,0x5e,0x66,0x39,0x2a,0x74,0x59,0x48,0x8b,0xca};
@@ -333,9 +400,10 @@
             constexpr std::array<unsigned char, 5> loggerInfo{0xe9,0x6b,0xb6,0x36,0x12};
             constexpr std::array<unsigned char, 16> loggerWarn{0x80,0x3d,0x99,0x66,0xd8,0x07,0x03,0x72,0x28,0x83,0x7a,0x08,0x00,0x74,0x05,0x4c};
             constexpr std::array<unsigned char, 16> loggerError{0x80,0x3d,0x89,0x32,0xd9,0x07,0x02,0x72,0x28,0x83,0x7a,0x08,0x00,0x74,0x05,0x4c};
-            return (scriptVerifyPatched ? ScriptVerifyOwnership() : ScriptVerifyOriginalEntry()) && ScriptBodyMatches(0x61ec420, executeEntry) &&
+            return (scriptVerifyPatched ? ScriptVerifyOwnership() : (ScriptVerifyOriginalEntry() || ScriptVerifyExternalHook())) &&
+                ScriptBodyMatches(0x61ec420, executeEntry) &&
                 ScriptBodyMatches(0x61ec495, loaderDispatch) &&
-                ScriptBodyMatches(0x61ec4ce, verifierDispatch) &&
+                ScriptVerifierCallSiteValid() &&
                 ScriptBodyMatches(0x127c240, wideConstructor) &&
                 ScriptBodyMatches(0x66b6a50, engineAllocate) &&
                 ScriptBodyMatches(0x62c6490, loaderSearch) &&
@@ -443,7 +511,8 @@ console.log(ack+'ok'+(command==='tick'?'|'+JSON.stringify(value):''));
                 }
                 scriptPatched[i] = true;
             }
-            if (!InstallScriptVerifyHook()) {
+            const bool externalBypass = !scriptVerifyPatched && ScriptExternalBypassActive();
+            if (externalBypass ? !PatchScriptVerifyCallSite() : !InstallScriptVerifyHook()) {
                 const bool restored = RestoreScriptHooks();
                 scriptReply = "私有模块验证入口未能安装";
                 gloss::Log(std::format("PBZ script bridge install failed: sequence={} verifierRestored={} callbacksRestored={}",

@@ -634,6 +634,7 @@ namespace gloss::gameplay::native {
         }
         void ExtendedResourcePreChange(void* object, const void* attribute, float* proposed, bool baseValue) noexcept;
         void AppendExtendedToggleSlice(const Context& context, std::size_t slice, std::vector<ToggleState>& states);
+        bool ExtendedCapability(const Context& context, std::string_view id, std::string& reason);
         #include "native_attributes.inc"
         #include "native_combat.inc"
         #include "native_movement.inc"
@@ -692,6 +693,11 @@ namespace gloss::gameplay::native {
             PerformanceScope performance(7);
             if (slice < ToggleSliceCount) AppendToggleSlice(context, slice, statusStates);
             else {
+                for (const auto id : {"add_dust", "add_upgrade_materials"}) {
+                    std::string reason;
+                    const bool ready = ExtendedCapability(context, id, reason);
+                    GetBackend().SetCapability(id, ready, ready ? "参数契约已核对，可提交调用" : reason);
+                }
                 PublishReadback(ReadHealth(context), &context);
                 if (faulted.load()) return;
                 PublishToggleStatesFrom(std::exchange(statusStates, {}));

@@ -181,6 +181,10 @@ namespace gloss::gameplay {
                         {toggle.id, enabled ? "on" : "off"});
                 }
             }
+            add("add_dust", "添加意识尘埃", "增加指定数量的意识尘埃。", 3, 1,
+                "Native_ExtendedAction", {Number("quantity", "意识尘埃数量", "999999", 1, MaxItemQuantity, ParamType::Int)}, true, {"add_dust"});
+            add("add_upgrade_materials", "添加升级材料", "按指定数量增加全部武器、影之武装、药瓶与饰品的升级材料。", 3, 1,
+                "Native_ExtendedAction", {Number("quantity", "升级材料数量", "99", 1, 999, ParamType::Int)}, true, {"add_upgrade_materials"});
             add("remaining_days", "设置剩余天数", "修改剩余天数；可能写入存档，执行后不会自动重放。", 5, 1,
                 "Native_ExtendedAction", {Number("value", "剩余天数", "66", 0, 66, ParamType::Int)}, true, {"remaining_days"});
             add("unlock_66_days", "解锁六十六天难度", "解锁六十六天难度选项；执行后不会自动重放。", 5, 1,

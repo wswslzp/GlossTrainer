@@ -236,7 +236,7 @@
                 ObjectName(function) != expected.name || Read<std::uint32_t>(function + 0x100) != table.grantFlags ||
                 Read<std::uint8_t>(function + 0x104) != expected.count ||
                 Read<std::uint16_t>(function + 0x106) != expected.size ||
-                Read<Address>(function + 0x128) != base + expected.nativeRva) return false;
+                !Executable(Read<Address>(function + 0x128)) || !Executable(base + expected.nativeRva)) return false;
             std::array<bool, 8> found{};
             auto property = Read<Address>(function + 0x50);
             unsigned visited{};
@@ -1362,4 +1362,112 @@
                 return {RequestState::Verified, std::format("{}：库存 {} → {}，已核对增加 {}", name, *before, *after, quantity)};
             if (delta == 0) return {RequestState::Failed, "调用已返回，库存没有增加；不会重试"};
             return {RequestState::Indeterminate, std::format("库存增量 {} 与请求数量 {} 不一致；不会重试", delta, quantity)};
+        }
+        bool IsUpgradeMaterialSymbol(std::string_view symbolic, Address row) {
+            if (symbolic.starts_with("Weapon_Material_") ||
+                symbolic.starts_with("Ac_Material_") ||
+                symbolic.starts_with("Medi_Material_") ||
+                symbolic == "Item_001" || symbolic == "Item_Piece_001" ||
+                symbolic == "Item_002" || symbolic == "Item_Piece_002") {
+                return true;
+            }
+            return row && Read<std::uint8_t>(row + 0x26c) == 1;
+        }
+        bool AddUpgradeMaterialsCapability(const Context& context, std::string& reason) {
+            const auto& table = ItemTables[static_cast<std::size_t>(ItemKind::Prop)];
+            ItemSparseMap layout;
+            if (!ItemTableValid(table, layout) || layout.count != table.expectedSlots) {
+                reason = "道具表路径、反射行结构或稀疏映射未通过核对";
+                return false;
+            }
+            const auto backpack = Backpack(context);
+            if (backpack) {
+                const auto backpackType = Read<Address>(backpack + 0x10);
+                if (!ItemRowLayout(backpackType, table) ||
+                    !ItemFunctionSignature(FindFunction(backpackType, table.grant.name), table)) {
+                    reason = "发放函数反射契约不匹配";
+                    return false;
+                }
+            }
+            reason = "升级材料表与背包发放接口已核对";
+            return true;
+        }
+        ExecutionResult ExecuteAddUpgradeMaterials(const Context& context, const Request& request) {
+            if (request.arguments.size() != 2 || request.arguments[0] != "add_upgrade_materials")
+                return {RequestState::Failed, "发放数量必须为有效的正整数"};
+            int quantity{};
+            if (!ParseItemQuantity(request.arguments[1], quantity) || quantity < 1 || quantity > 999)
+                return {RequestState::Failed, "发放数量必须为有效的正整数"};
+            const auto backpack = Backpack(context);
+            if (!backpack) return {RequestState::Failed, "等待当前玩家背包子系统"};
+            const auto backpackIndex = Read<std::uint32_t>(backpack + 0xc);
+            const auto backpackType = Read<Address>(backpack + 0x10);
+            const auto& table = ItemTables[static_cast<std::size_t>(ItemKind::Prop)];
+            ItemSparseMap layout;
+            if (!ItemRowLayout(backpackType, table) || !ItemTableValid(table, layout) ||
+                layout.count != table.expectedSlots)
+                return {RequestState::Failed, "道具表路径、反射行结构或稀疏映射未通过核对"};
+            const auto function = FindFunction(backpackType, table.grant.name);
+            if (!ItemFunctionSignature(function, table))
+                return {RequestState::Failed, "发放函数契约不符，未执行"};
+            ItemAmounts before;
+            if (!ItemReadInventory(backpack, table, before))
+                return {RequestState::Failed, "无法读取发放前库存，未执行"};
+            std::vector<NameValue> materialIds;
+            for (std::int32_t slot = 0; slot < layout.count; ++slot) {
+                bool allocated{};
+                if (!ItemSlotAllocated(base + table.tableRva + 8, layout, slot, allocated) || !allocated) continue;
+                ItemMapEntry mapEntry;
+                NameValue rowId{};
+                if (!ItemReadMapEntry(layout, slot, mapEntry) || mapEntry.value < 0x10000 || (mapEntry.value & 7) ||
+                    !ReadBytes(mapEntry.value + 8, &rowId, sizeof(rowId)) || !ItemSameName(rowId, mapEntry.id)) continue;
+                const auto symbolic = Name(mapEntry.id.comparison);
+                if (!symbolic || symbolic->empty() || *symbolic == "None") continue;
+                if (IsUpgradeMaterialSymbol(*symbolic, mapEntry.value))
+                    materialIds.push_back(mapEntry.id);
+            }
+            if (materialIds.empty()) return {RequestState::Failed, "当前会话的物品目录尚未就绪"};
+            std::size_t dispatched{};
+            for (const auto& id : materialIds) {
+                const auto current = CurrentContext();
+                if (stopping.load() || faulted.load() || !LocalGameThread() || !current ||
+                    !current->SameKey(context) || Backpack(*current) != backpack ||
+                    Read<std::uint32_t>(backpack + 0xc) != backpackIndex)
+                    return {RequestState::Indeterminate, "调用后世界或玩家变化，结果无法确认；不会重试"};
+                const auto found = before.find(ItemNameIdentity(id));
+                const std::int64_t owned = found == before.end() ? 0 : found->second;
+                if (!ItemQuantityFitsInventory(owned, quantity)) continue;
+                alignas(8) std::array<std::byte, 16> parameters{};
+                std::memcpy(parameters.data(), &quantity, sizeof(quantity));
+                std::memcpy(parameters.data() + 4, &id, sizeof(id));
+                if (!CallProcessEvent(backpack, function, parameters.data())) {
+                    faulted.store(true);
+                    GetBackend().SetRuntimeState(false, "物品发放调用异常，适配器已停用；不会自动重试");
+                    return {RequestState::Indeterminate, "原生调用异常，库存变化无法确认；不会重试"};
+                }
+                ++dispatchedCalls;
+                ++dispatched;
+            }
+            const auto afterContext = CurrentContext();
+            if (!afterContext || !afterContext->SameKey(context) ||
+                Backpack(*afterContext) != backpack || Read<std::uint32_t>(backpack + 0xc) != backpackIndex)
+                return {RequestState::Indeterminate, "调用后世界或玩家变化，结果无法确认；不会重试"};
+            ItemAmounts after;
+            const bool readableAfter = ItemReadInventory(backpack, table, after);
+            if (itemCatalog.complete && ItemBackpackMatches(*afterContext, itemCatalog.backpack))
+                RefreshItems(*afterContext, true);
+            if (!readableAfter)
+                return {RequestState::Indeterminate, "调用已返回，发放后库存无法读取；不会重试"};
+            std::size_t verified{};
+            for (const auto& id : materialIds) {
+                const auto key = ItemNameIdentity(id);
+                const auto beforeValue = before.find(key) == before.end() ? 0 : before[key];
+                const auto afterValue = after.find(key) == after.end() ? 0 : after[key];
+                if (afterValue - beforeValue == quantity) ++verified;
+            }
+            if (verified > 0)
+                return {RequestState::Verified, std::format("已为 {} 种升级材料各增加 {} 个", verified, quantity)};
+            if (dispatched == 0)
+                return {RequestState::Failed, "当前数量加请求数量会溢出，未执行"};
+            return {RequestState::Failed, "调用已返回，库存没有增加；不会重试"};
         }

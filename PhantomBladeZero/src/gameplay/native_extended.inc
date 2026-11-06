@@ -281,6 +281,8 @@
             if (CooldownFeature(id)) return CooldownCapability(context, id, reason);
             if (StealthFeature(id)) return StealthCapability(context, id, reason);
             if (ProgressFeature(id)) return ProgressCapability(context, id, reason);
+            if (id == "add_dust") return AddDustCapability(context, reason);
+            if (id == "add_upgrade_materials") return AddUpgradeMaterialsCapability(context, reason);
             if (id == "remaining_days") {
                 const bool ready = PropertyLayout(FindProperty(Read<Address>(context.pawn + 0x10), "RemainingDays"), "IntProperty", 4, 0x103c);
                 reason = ready ? "玩家剩余天数字段已核对；存档由游戏正常保存" : "剩余天数字段未通过核对";
@@ -310,6 +312,8 @@
             if (CooldownFeature(id)) return ExecuteCooldown(context, request);
             if (StealthFeature(id)) return ExecuteStealth(context, request);
             if (ProgressFeature(id)) return ExecuteProgress(context, request);
+            if (id == "add_dust") return ExecuteAddDust(context, request);
+            if (id == "add_upgrade_materials") return ExecuteAddUpgradeMaterials(context, request);
             if (id == "remaining_days" && request.arguments.size() == 2) {
                 std::string reason;
                 const auto& text = request.arguments[1];
