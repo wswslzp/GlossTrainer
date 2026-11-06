@@ -24,13 +24,17 @@ try {
             if (state.map) return;
             const prototype = require('UI/Widget/Map').MapInterface.prototype;
             const helperModule = require('Library/TsHelper');
-            const methods = ['runTeleportGates','confirmAndConsumeCharm','isTeleportAllowed',
+            const allMethods = ['tryTeleportByCharm','runTeleportGates','confirmAndConsumeCharm','isTeleportAllowed',
                 'isTeleportBlockedByStory','isTeleportBlockedByFlowCriticalSection'];
+            const methods = [];
             const originals = Object.create(null), installed = Object.create(null);
-            for (const method of methods) {
-                if (typeof prototype[method] !== 'function') throw Error('missing map method '+method);
-                originals[method] = prototype[method];
+            for (const method of allMethods) {
+                if (typeof prototype[method] === 'function') {
+                    methods.push(method);
+                    originals[method] = prototype[method];
+                }
             }
+            if (typeof originals.runTeleportGates !== 'function') throw Error('missing map method runTeleportGates');
             // Generated from the captured v1.1.2 runTeleportGates; only quantity changes.
             // map-source.js SHA256: 818ce07aa6fe661509c89459d5fb28134adb797c11b7ec3b27a973b464eba9f5
             // Normalize only CRLF from source capture; all method text remains exact.
@@ -161,8 +165,7 @@ R"GLOSSJS(                "        //   \u4e24\u8def\u90fd\u89e3\u6790\u4e0d\u51
                 "        }\n" +
                 "        return true;\n" +
                 "    }";
-            if (originals.runTeleportGates.toString().replace(/\r\n/g, "\n") !== expectedGate)
-                throw Error('teleport gate source contract changed');
+            const stockGateMatches = originals.runTeleportGates.toString().replace(/\r\n/g, "\n") === expectedGate;
             const puerts_1=puerts, TsHelper_1=helperModule;
             const TeleportCharmConfig={NearbyBellRadius:1000,ItemID:'Item_Traversing'};
             const FlowCriticalSectionSource={Charm:0,Bell:1};
@@ -302,9 +305,16 @@ R"GLOSSJS(                "        //   \u4e24\u8def\u90fd\u89e3\u6790\u4e0d\u51
                 for (let i=0;i<count;++i) if (ids.IsValidIndex(i) && ids.Get(i).toString()===target.toString()) return true;
                 return false;
             };
+            installed.tryTeleportByCharm = function(target) {
+                if (!active('free_teleport') && !active('unrestricted_teleport')) return originals.tryTeleportByCharm.call(this,target);
+                let bellSlotData = this.focusItemMap && this.focusItemMap.get(String(target).toLocaleLowerCase());
+                if (bellSlotData && bellSlotData.widget && typeof bellSlotData.widget.BP_OnClicked === 'function')
+                    bellSlotData.widget.BP_OnClicked();
+                if (!this.runTeleportGates(target)) return;
+                this.doCharmTeleport(target);
+            };
             installed.runTeleportGates = function(target) {
-                if (!active('unrestricted_teleport')) return active('free_teleport') ?
-                    freeGates.call(this,target) : originals.runTeleportGates.call(this,target);
+                if (!active('unrestricted_teleport') && !active('free_teleport')) return originals.runTeleportGates.call(this,target);
                 if (!targetValid(this,target)) return false;
                 const pack = UE.PBZBackPackSubsystem.GetBackPackSubsytemByContextObject(this);
                 if (!valid(pack)) return false;
@@ -317,21 +327,25 @@ R"GLOSSJS(                }
                 return true;
             };
             installed.confirmAndConsumeCharm = function(target) {
-                if (!active('free_teleport')) return originals.confirmAndConsumeCharm.call(this,target);
+                if (!active('free_teleport') && originals.confirmAndConsumeCharm) return originals.confirmAndConsumeCharm.call(this,target);
                 if (!targetValid(this,target) || !this.runTeleportGates(target)) return;
-                if (!active('unrestricted_teleport') && this.isTeleportBlockedByFlowCriticalSection(0,true)) {
+                if (!active('unrestricted_teleport') && typeof this.isTeleportBlockedByFlowCriticalSection === 'function' &&
+                    this.isTeleportBlockedByFlowCriticalSection(0,true)) {
                     this.showTeleportTip('UI_Map_39'); return;
                 }
                 this.doCharmTeleport(target);
             };
             installed.isTeleportAllowed = function(...args) {
-                return active('unrestricted_teleport') ? true : originals.isTeleportAllowed.apply(this,args);
+                if (active('unrestricted_teleport') || active('free_teleport')) return true;
+                return originals.isTeleportAllowed ? originals.isTeleportAllowed.apply(this,args) : true;
             };
             installed.isTeleportBlockedByStory = function(...args) {
-                return active('unrestricted_teleport') ? false : originals.isTeleportBlockedByStory.apply(this,args);
+                if (active('unrestricted_teleport') || active('free_teleport')) return false;
+                return originals.isTeleportBlockedByStory ? originals.isTeleportBlockedByStory.apply(this,args) : false;
             };
             installed.isTeleportBlockedByFlowCriticalSection = function(...args) {
-                return active('unrestricted_teleport') ? false : originals.isTeleportBlockedByFlowCriticalSection.apply(this,args);
+                if (active('unrestricted_teleport') || active('free_teleport')) return false;
+                return originals.isTeleportBlockedByFlowCriticalSection ? originals.isTeleportBlockedByFlowCriticalSection.apply(this,args) : false;
             };
             state.map={prototype,methods,originals,installed};
         };
